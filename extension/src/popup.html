@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Prompt Linter</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <h1 class="popup__title">Prompt Linter</h1>
+      <p class="popup__subtitle" id="statusText" data-state-text>IDLE: Ready.</p>
+
+      <section class="popup__controls">
+        <label for="promptInput">Prompt</label>
+        <textarea
+          id="promptInput"
+          data-prompt-input
+          placeholder="Paste a prompt or import it from the page..."
+          spellcheck="false"
+        ></textarea>
+        <button id="lintButton" data-lint-btn type="button">Lint Prompt</button>
+      </section>
+
+      <section class="popup__source">
+        <button id="extractButton" data-extract-btn type="button">Extract from Page</button>
+        <button id="copyButton" data-copy-btn type="button">Copy Prompt</button>
+        <button id="clearButton" data-clear-btn type="button">Clear</button>
+      </section>
+
+      <section class="summary">
+        <div class="summary__row">
+          <span class="summary__label">Source:</span>
+          <span id="sourceBadge" data-source-text>No source.</span>
+        </div>
+        <div class="summary__row">
+          <span class="summary__label">Score:</span>
+          <span class="summary__score" id="scoreValue" data-score-pill>--</span>
+        </div>
+        <p class="summary__hint" id="scoreTone">Run lint to score this prompt.</p>
+        <p class="summary__hint" id="summaryText" data-summary-text>Run linting to see feedback.</p>
+      </section>
+
+      <section>
+        <h2 class="popup__subtitle">Issues</h2>
+        <ul class="issues" id="issuesList" data-issues-list></ul>
+      </section>
+
+      <section>
+        <h2 class="popup__subtitle">Suggestions</h2>
+        <ul class="issues" id="suggestionsList" data-suggestions-list></ul>
+      </section>
+    </main>
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>
