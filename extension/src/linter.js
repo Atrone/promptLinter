@@ -14,8 +14,8 @@ function normalizePrompt(promptText) {
  * @param {"high"|"medium"|"low"} severity - Issue severity.
  * @param {string} message - Human readable issue message.
  * @param {string} fix - Recommended prompt improvement.
- * @param {{label:string,description:string,replacement:string}} action - Applyable prompt fix.
- * @returns {{rule:string,severity:string,message:string,fix:string,action:object}} Lint issue object.
+ * @param {{label:string,description:string,replacement:string}} action - Hover resolution guidance.
+ * @returns {{rule:string,severity:string,message:string,fix:string,action:object,highlights:Array<object>}} Lint issue object.
  */
 function createIssue(rule, severity, message, fix, action) {
   // Keep issue shape consistent for popup rendering.
@@ -24,7 +24,8 @@ function createIssue(rule, severity, message, fix, action) {
     severity,
     message,
     fix,
-    action
+    action,
+    highlights: []
   };
 }
 
@@ -214,20 +215,20 @@ function replaceVagueLanguage(promptText) {
 }
 
 /**
- * Builds an applyable fix option for a lint issue.
+ * Builds a hover resolution option for a lint issue.
  * @param {string} rule - Rule identifier.
  * @param {string} promptText - Current prompt text.
- * @returns {{label:string,description:string,replacement:string}} Fix option for UI actions.
+ * @returns {{label:string,description:string,replacement:string}} Fix option for UI hover cards.
  */
 function buildIssueAction(rule, promptText) {
-  // Normalize once so each fix starts from the same prompt text.
+  // Normalize once so replacements are deterministic.
   const normalizedPrompt = normalizePrompt(promptText);
 
   // Build a deterministic rewrite for each rule.
   if (rule === "empty-prompt") {
     return {
       label: "Insert starter prompt",
-      description: "Adds a complete prompt scaffold.",
+      description: "Start with Role, Goal, Context, Requirements, and Output Format sections.",
       replacement: buildImprovedPrompt("")
     };
   }
@@ -235,7 +236,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "prompt-too-short") {
     return {
       label: "Add detail placeholders",
-      description: "Adds context, success criteria, and depth guidance.",
+      description: "Add context, success criteria, and expected depth.",
       replacement: appendPromptSection(normalizedPrompt, "Details to include:", [
         "- Context: [describe the situation and audience].",
         "- Success criteria: [describe what a good answer must include].",
@@ -247,7 +248,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "low-structure") {
     return {
       label: "Convert to structured prompt",
-      description: "Wraps the prompt in Role, Goal, Context, Requirements, and Output Format sections.",
+      description: "Wrap the prompt in Role, Goal, Context, Requirements, and Output Format sections.",
       replacement: buildImprovedPrompt(normalizedPrompt)
     };
   }
@@ -255,7 +256,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "missing-role") {
     return {
       label: "Add role",
-      description: "Adds expert role framing before the prompt.",
+      description: "Add a sentence such as: You are an expert assistant in this domain.",
       replacement: "You are an expert assistant in this domain.\n\n" + normalizedPrompt
     };
   }
@@ -263,7 +264,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "missing-objective") {
     return {
       label: "Clarify objective",
-      description: "Adds an explicit task objective.",
+      description: "Add a clear action verb and state the expected outcome.",
       replacement: appendPromptSection(normalizedPrompt, "Task objective:", [
         "Analyze the request and provide a clear, useful response."
       ])
@@ -273,7 +274,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "missing-context") {
     return {
       label: "Add context",
-      description: "Adds audience and background guidance.",
+      description: "Describe the audience, background, assumptions, and source material.",
       replacement: appendPromptSection(normalizedPrompt, "Context:", [
         "Audience: General readers.",
         "Background: Use the information in the prompt and state assumptions when details are missing."
@@ -284,7 +285,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "missing-constraints") {
     return {
       label: "Add constraints",
-      description: "Adds boundaries for length, claims, and assumptions.",
+      description: "Add boundaries for length, exclusions, required inclusions, and assumptions.",
       replacement: appendPromptSection(normalizedPrompt, "Requirements:", [
         "- Keep the answer concise and actionable.",
         "- Avoid unsupported claims.",
@@ -296,7 +297,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "missing-output-format") {
     return {
       label: "Add output format",
-      description: "Adds markdown section formatting.",
+      description: "Request a concrete response shape like JSON, a table, bullets, or markdown sections.",
       replacement: appendPromptSection(normalizedPrompt, "Output format:", [
         "Return markdown with sections: Summary, Details, and Next Steps."
       ])
@@ -306,7 +307,7 @@ function buildIssueAction(rule, promptText) {
   if (rule === "vague-language") {
     return {
       label: "Clarify vague wording",
-      description: "Replaces vague words with more concrete wording.",
+      description: "Replace vague terms with measurable requirements, named examples, or specific constraints.",
       replacement: replaceVagueLanguage(normalizedPrompt)
     };
   }
@@ -314,9 +315,103 @@ function buildIssueAction(rule, promptText) {
   // Fall back to the full prompt scaffold for unknown rule actions.
   return {
     label: "Improve prompt",
-    description: "Applies the structured prompt template.",
+    description: "Use the structured prompt template to make the request clearer.",
     replacement: buildImprovedPrompt(normalizedPrompt)
   };
+}
+
+/**
+ * Builds hover-only resolution options for an issue.
+ * @param {object} issue - Lint issue with fix and action text.
+ * @returns {Array<{label:string,description:string,replacement:string}>} Resolution options for tooltip rendering.
+ */
+function buildResolutionOptions(issue) {
+  // Keep options descriptive instead of mutating the prompt automatically.
+  const options = [
+    {
+      label: issue.action && issue.action.label ? issue.action.label : "Improve prompt",
+      description: issue.action && issue.action.description ? issue.action.description : issue.fix,
+      replacement: issue.action && issue.action.replacement ? issue.action.replacement : ""
+    },
+    {
+      label: "Manual edit",
+      description: issue.fix,
+      replacement: issue.action && issue.action.replacement ? issue.action.replacement : ""
+    }
+  ];
+
+  // Remove duplicate descriptions so hover cards stay compact.
+  const seen = new Set();
+  return options.filter((option) => {
+    const key = option.label + "::" + option.description;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Finds vague language ranges in the prompt.
+ * @param {string} promptText - Normalized prompt text.
+ * @returns {Array<{start:number,end:number}>} Matched vague word ranges.
+ */
+function findVagueLanguageRanges(promptText) {
+  // Underline each vague term directly when possible.
+  const ranges = [];
+  const matcher = /\b(stuff|things|something|maybe|etc)\b/gi;
+  let match = matcher.exec(promptText);
+  while (match) {
+    ranges.push({
+      start: match.index,
+      end: match.index + match[0].length
+    });
+    match = matcher.exec(promptText);
+  }
+  return ranges;
+}
+
+/**
+ * Builds a fallback prompt range for conceptual lint issues.
+ * @param {string} promptText - Normalized prompt text.
+ * @returns {{start:number,end:number} | null} Range to underline, or null.
+ */
+function getPromptHighlightRange(promptText) {
+  // Missing structural pieces apply to the authored prompt as a whole.
+  if (!promptText) {
+    return null;
+  }
+  return {
+    start: 0,
+    end: promptText.length
+  };
+}
+
+/**
+ * Adds hover annotation ranges to an issue.
+ * @param {object} issue - Lint issue to annotate.
+ * @param {string} promptText - Normalized prompt text.
+ * @returns {object} Issue with highlight metadata.
+ */
+function annotateIssue(issue, promptText) {
+  // Build tooltip text once so each highlighted range has the same options.
+  const options = buildResolutionOptions(issue);
+  const ranges = issue.rule === "vague-language" ? findVagueLanguageRanges(promptText) : [getPromptHighlightRange(promptText)];
+
+  // Convert valid ranges into UI-friendly highlights.
+  issue.highlights = ranges
+    .filter((range) => range && range.end > range.start)
+    .map((range) => ({
+      start: range.start,
+      end: range.end,
+      rule: issue.rule,
+      severity: issue.severity,
+      message: issue.message,
+      options
+    }));
+
+  return issue;
 }
 
 /**
@@ -455,14 +550,17 @@ function lintPrompt(promptText) {
     );
   }
 
+  // Attach text ranges used by hover annotations.
+  const annotatedIssues = issues.map((issue) => annotateIssue(issue, normalizedPrompt));
+
   // Build unique suggestions list from issue fixes.
-  const suggestions = [...new Set(issues.map((issue) => issue.fix))];
+  const suggestions = [...new Set(annotatedIssues.map((issue) => issue.fix))];
   return {
     normalizedPrompt,
-    score: computeScore(issues),
-    severity: computeOverallSeverity(issues),
-    summary: buildSummary(issues),
-    issues,
+    score: computeScore(annotatedIssues),
+    severity: computeOverallSeverity(annotatedIssues),
+    summary: buildSummary(annotatedIssues),
+    issues: annotatedIssues,
     suggestions,
     improvedPrompt: buildImprovedPrompt(normalizedPrompt)
   };

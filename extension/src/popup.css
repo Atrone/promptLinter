@@ -36,16 +36,48 @@ body {
   gap: 8px;
 }
 
-#promptInput {
+.prompt-editor {
+  position: relative;
+  width: 100%;
+  background: #020617;
+  border-radius: 8px;
+}
+
+#promptInput,
+.prompt-editor__annotations {
   width: 100%;
   min-height: 180px;
-  resize: vertical;
   border: 1px solid #334155;
   border-radius: 8px;
   padding: 10px;
-  background: #020617;
-  color: #e2e8f0;
   font-size: 0.9rem;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+#promptInput {
+  position: relative;
+  z-index: 1;
+  resize: vertical;
+  background: transparent;
+  color: #e2e8f0;
+  caret-color: #e2e8f0;
+}
+
+.prompt-editor__annotations {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-color: transparent;
+  overflow: visible;
+  color: transparent;
+  pointer-events: none;
+}
+
+.prompt-editor__annotations:empty {
+  display: none;
 }
 
 .popup__source {
@@ -171,22 +203,72 @@ body {
   line-height: 1.3;
 }
 
-.card__action-description {
+.card__annotation-hint {
   margin-top: 6px !important;
   color: #94a3b8 !important;
 }
 
-.card__action {
-  margin-top: 8px;
-  border: 0;
-  border-radius: 8px;
-  background: #2563eb;
-  color: #eff6ff;
-  font-weight: 700;
-  padding: 7px 9px;
-  cursor: pointer;
+.annotation__underline {
+  position: relative;
+  color: transparent;
+  text-decoration-line: underline;
+  text-decoration-color: #ef4444;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 2px;
+  cursor: help;
+  pointer-events: auto;
 }
 
-.card__action:hover {
+.annotation__tooltip {
+  display: none;
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  width: 240px;
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 2147483647;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 6px;
+  background: #0f172a;
+  color: #f8fafc;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.annotation__tooltip strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.annotation__suggestion {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #eff6ff;
+  padding: 4px 6px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+.annotation__suggestion:hover {
   background: #1d4ed8;
+}
+
+.annotation__underline:hover .annotation__tooltip,
+.annotation__underline:focus .annotation__tooltip,
+.annotation__tooltip.is-open {
+  display: block;
 }

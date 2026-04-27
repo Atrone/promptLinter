@@ -124,15 +124,16 @@ async function runAutomaticExtractWorkflow(tabId, promptText) {
       score: lintResult.score,
       severity: getOverallSeverity(lintResult.issues),
       findings: lintResult.issues.map(function mapIssue(issue) {
-        // Keep overlay findings compact while preserving apply actions.
+        // Keep overlay findings compact while preserving hover annotations.
         return {
           message: issue.message,
           severity: issue.severity,
-          action: issue.action
+          highlights: issue.highlights
         };
       })
     },
-    selection: collectedPrompt.selection
+    selection: collectedPrompt.selection,
+    promptText: lintResult.normalizedPrompt
   });
 }
 

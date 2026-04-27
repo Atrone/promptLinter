@@ -3,6 +3,7 @@ import { lintPrompt, buildImprovedPrompt } from "./linter.js";
 var AUTO_EXTRACT_MAX_AGE_MS = 5 * 60 * 1000;
 var autoExtractInProgress = false;
 var currentPromptSelection = null;
+var promptLintTimer = null;
 
 /**
  * Maps score numbers into user-facing quality tones.
@@ -73,13 +74,13 @@ function createListItem(title, body) {
 }
 
 /**
- * Creates a card item with an applyable lint fix.
- * @param {object} issue - Lint issue with action metadata.
+ * Creates a card item describing hover-based lint resolution options.
+ * @param {object} issue - Lint issue with resolution metadata.
  * @param {number} index - Display index for the issue.
- * @returns {HTMLLIElement} Rendered issue action element.
+ * @returns {HTMLLIElement} Rendered issue element.
  */
-function createIssueActionItem(issue, index) {
-  // Build the card using DOM nodes so action text remains safe.
+function createIssueAnnotationItem(issue, index) {
+  // Build the card using DOM nodes so issue text remains safe.
   var item = document.createElement("li");
   item.className = "card";
 
@@ -89,24 +90,188 @@ function createIssueActionItem(issue, index) {
   var paragraph = document.createElement("p");
   paragraph.textContent = issue.message + " Fix: " + issue.fix;
 
-  var actionDescription = document.createElement("p");
-  actionDescription.className = "card__action-description";
-  actionDescription.textContent = issue.action && issue.action.description ? issue.action.description : "Apply a suggested rewrite.";
-
-  var button = document.createElement("button");
-  button.type = "button";
-  button.className = "card__action";
-  button.textContent = issue.action && issue.action.label ? issue.action.label : "Apply fix";
-  button.addEventListener("click", function handleApplyClick() {
-    // Apply the issue rewrite to the prompt and refresh lint output.
-    applyIssueAction(issue);
-  });
+  var hint = document.createElement("p");
+  hint.className = "card__annotation-hint";
+  hint.textContent = "Hover the red underline in the annotated prompt to view resolution options.";
 
   item.appendChild(heading);
   item.appendChild(paragraph);
-  item.appendChild(actionDescription);
-  item.appendChild(button);
+  item.appendChild(hint);
   return item;
+}
+
+/**
+ * Collects underline ranges from lint issues.
+ * @param {object} lintResult - Result payload returned by lintPrompt.
+ * @returns {Array<object>} Non-overlapping annotation groups.
+ */
+function collectAnnotationGroups(lintResult) {
+  // Flatten all issue highlights into a single range list.
+  var groupsByRange = new Map();
+  lintResult.issues.forEach(function collectIssue(issue) {
+    (issue.highlights || []).forEach(function collectHighlight(highlight) {
+      var key = highlight.start + ":" + highlight.end;
+      var group = groupsByRange.get(key) || {
+        start: highlight.start,
+        end: highlight.end,
+        messages: [],
+        options: []
+      };
+      group.messages.push(highlight.message);
+      group.options = group.options.concat(highlight.options || []);
+      groupsByRange.set(key, group);
+    });
+  });
+
+  // Sort and merge overlapping ranges so rendering stays valid.
+  var groups = Array.from(groupsByRange.values()).sort(function sortByRange(a, b) {
+    return a.start - b.start || b.end - a.end;
+  });
+  return groups.reduce(function mergeOverlaps(merged, group) {
+    var previous = merged[merged.length - 1];
+    if (previous && group.start < previous.end) {
+      previous.end = Math.max(previous.end, group.end);
+      previous.messages = previous.messages.concat(group.messages);
+      previous.options = previous.options.concat(group.options);
+      return merged;
+    }
+    merged.push(group);
+    return merged;
+  }, []);
+}
+
+/**
+ * Creates a tooltip listing clickable lint resolution options.
+ * @param {Array<string>} messages - Lint messages for this underline.
+ * @param {Array<object>} options - Resolution options for this underline.
+ * @returns {HTMLSpanElement} Rendered tooltip element.
+ */
+function createAnnotationTooltip(messages, options) {
+  // Render a compact hover card with replacement choices.
+  var tooltip = document.createElement("span");
+  tooltip.className = "annotation__tooltip";
+  tooltip.addEventListener("wheel", function handleTooltipWheel(event) {
+    // Keep tooltip scrolling from moving the underlying editor.
+    event.stopPropagation();
+  });
+
+  var title = document.createElement("strong");
+  title.textContent = messages.filter(Boolean).join(" ");
+  tooltip.appendChild(title);
+
+  var seen = new Set();
+  options.forEach(function renderOption(option) {
+    var key = option.label + "::" + option.description;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "annotation__suggestion";
+    button.textContent = option.label + ": " + option.description;
+    button.addEventListener("click", function handleSuggestionClick(event) {
+      // Keep the click inside the tooltip from focusing the underlying textarea.
+      event.preventDefault();
+      event.stopPropagation();
+      applySuggestionReplacement(option.replacement || "");
+    });
+    tooltip.appendChild(button);
+  });
+  return tooltip;
+}
+
+/**
+ * Keeps an annotation tooltip open during forgiving pointer movement.
+ * @param {HTMLElement} underline - Underlined text span.
+ * @param {HTMLElement} tooltip - Tooltip shown for the underline.
+ */
+function wireStableAnnotationTooltip(underline, tooltip) {
+  // Delay closing so moving from underline into the tooltip does not dismiss it.
+  var closeTimer = null;
+
+  /**
+   * Opens the tooltip and cancels any pending close.
+   */
+  function openTooltip() {
+    // Mark open state with a class so CSS controls display.
+    window.clearTimeout(closeTimer);
+    tooltip.classList.add("is-open");
+  }
+
+  /**
+   * Closes the tooltip after a small grace period.
+   */
+  function scheduleCloseTooltip() {
+    // A small delay tolerates diagonal mouse movement and internal scrolling.
+    window.clearTimeout(closeTimer);
+    closeTimer = window.setTimeout(function closeTooltip() {
+      tooltip.classList.remove("is-open");
+    }, 350);
+  }
+
+  // Keep the tooltip open while either element is hovered.
+  underline.addEventListener("mouseenter", openTooltip);
+  underline.addEventListener("mouseleave", scheduleCloseTooltip);
+  tooltip.addEventListener("mouseenter", openTooltip);
+  tooltip.addEventListener("mouseleave", scheduleCloseTooltip);
+
+  // Keep keyboard focus transitions into tooltip buttons from closing it.
+  underline.addEventListener("focusin", openTooltip);
+  underline.addEventListener("focusout", function handleFocusOut(event) {
+    if (!tooltip.contains(event.relatedTarget)) {
+      scheduleCloseTooltip();
+    }
+  });
+  tooltip.addEventListener("focusin", openTooltip);
+  tooltip.addEventListener("focusout", function handleTooltipFocusOut(event) {
+    if (!underline.contains(event.relatedTarget)) {
+      scheduleCloseTooltip();
+    }
+  });
+}
+
+/**
+ * Renders red underlines inside the prompt editor overlay.
+ * @param {object} lintResult - Result payload returned by lintPrompt.
+ */
+function renderPromptEditorAnnotations(lintResult) {
+  // Mirror textarea text in an overlay so the actual editor keeps focus and input.
+  var container = document.getElementById("promptAnnotationLayer");
+  var promptInput = document.getElementById("promptInput");
+  var promptText = lintResult.normalizedPrompt || "";
+  var groups = collectAnnotationGroups(lintResult);
+  container.textContent = "";
+
+  if (!promptText) {
+    return;
+  }
+
+  // Append plain and annotated text spans in source order.
+  var cursor = 0;
+  groups.forEach(function renderGroup(group) {
+    if (group.start > cursor) {
+      container.appendChild(document.createTextNode(promptText.slice(cursor, group.start)));
+    }
+
+    var underline = document.createElement("span");
+    var tooltip = createAnnotationTooltip(group.messages, group.options);
+    underline.className = "annotation__underline";
+    underline.tabIndex = 0;
+    underline.textContent = promptText.slice(group.start, group.end);
+    underline.appendChild(tooltip);
+    wireStableAnnotationTooltip(underline, tooltip);
+    container.appendChild(underline);
+    cursor = group.end;
+  });
+
+  if (cursor < promptText.length) {
+    container.appendChild(document.createTextNode(promptText.slice(cursor)));
+  }
+
+  // Keep overlay position aligned with textarea scrolling.
+  container.scrollTop = promptInput.scrollTop;
+  container.scrollLeft = promptInput.scrollLeft;
 }
 
 /**
@@ -234,9 +399,10 @@ function renderResults(lintResult, sourceLabel) {
     issuesList.appendChild(createListItem("No issues detected", "Prompt structure looks strong."));
   } else {
     sortedIssues.forEach(function renderIssue(issue, index) {
-      issuesList.appendChild(createIssueActionItem(issue, index));
+      issuesList.appendChild(createIssueAnnotationItem(issue, index));
     });
   }
+  renderPromptEditorAnnotations(lintResult);
 
   // Render unique improvement suggestions from linter output.
   clearList(suggestionsList);
@@ -266,12 +432,12 @@ function lintCurrentPrompt() {
 }
 
 /**
- * Applies replacement prompt text to the active page when possible.
+ * Applies replacement prompt text to the active page when available.
  * @param {string} promptText - Replacement prompt text.
  * @returns {Promise<void>} Promise resolved after page update attempt.
  */
 async function applyPromptToActivePage(promptText) {
-  // Skip page updates for prompts typed directly in the popup.
+  // Only extracted prompts have a source selector on the page.
   if (!currentPromptSelection || !currentPromptSelection.selector) {
     return;
   }
@@ -287,25 +453,23 @@ async function applyPromptToActivePage(promptText) {
 }
 
 /**
- * Applies a selected issue action to the current prompt.
- * @param {object} issue - Lint issue with action metadata.
+ * Applies a clicked suggestion replacement to the editor.
+ * @param {string} replacement - Replacement prompt text.
  */
-function applyIssueAction(issue) {
-  // Ignore malformed issue actions defensively.
-  if (!issue || !issue.action || !issue.action.replacement) {
+function applySuggestionReplacement(replacement) {
+  // Ignore empty replacement payloads from malformed options.
+  if (!replacement) {
     return;
   }
 
-  // Update the popup prompt first so feedback is immediate.
+  // Update the actual textarea, rerun linting, and keep page source in sync.
   var promptInput = document.getElementById("promptInput");
-  promptInput.value = issue.action.replacement;
-  var lintResult = lintPrompt(promptInput.value);
+  promptInput.value = replacement;
+  var lintResult = lintPrompt(replacement);
   renderResults(lintResult, currentPromptSelection ? currentPromptSelection.source : "manual");
-  setStatus("Fix applied.");
-
-  // Mirror the fix back to the source page when the prompt was extracted.
-  applyPromptToActivePage(promptInput.value).catch(function handleApplyError(error) {
-    setStatus("Fix applied in popup. Page update failed: " + error.message);
+  setStatus("Suggestion applied.");
+  applyPromptToActivePage(replacement).catch(function handleApplyError(error) {
+    setStatus("Suggestion applied in popup. Page update failed: " + error.message);
   });
 }
 
@@ -342,11 +506,12 @@ async function extractFromPage() {
             return {
               message: issue.message,
               severity: issue.severity,
-              action: issue.action
+              highlights: issue.highlights
             };
           })
         },
-        selection: response.selection || null
+        selection: response.selection || null,
+        promptText: lintResult.normalizedPrompt
       }
     });
   } catch (_error) {
@@ -379,6 +544,7 @@ function clearAll(updateStatus) {
   document.getElementById("sourceBadge").textContent = "none";
   document.getElementById("sourceBadge").setAttribute("data-severity", "none");
   document.getElementById("summaryText").textContent = "Run linting to see feedback.";
+  document.getElementById("promptAnnotationLayer").textContent = "";
   clearList(document.getElementById("issuesList"));
   clearList(document.getElementById("suggestionsList"));
   if (updateStatus) {
@@ -481,14 +647,44 @@ function handleClearClick() {
 }
 
 /**
+ * Keeps annotation overlay aligned while the textarea scrolls.
+ */
+function syncPromptAnnotationScroll() {
+  // Mirror textarea scroll offsets onto the annotation layer.
+  var promptInput = document.getElementById("promptInput");
+  var annotationLayer = document.getElementById("promptAnnotationLayer");
+  annotationLayer.scrollTop = promptInput.scrollTop;
+  annotationLayer.scrollLeft = promptInput.scrollLeft;
+}
+
+/**
+ * Reruns linting shortly after the user edits the prompt.
+ */
+function handlePromptInputChange() {
+  // Debounce linting so typing remains responsive.
+  window.clearTimeout(promptLintTimer);
+  promptLintTimer = window.setTimeout(function runLiveLint() {
+    var promptText = document.getElementById("promptInput").value;
+    if (!promptText.trim()) {
+      clearAll(false);
+      return;
+    }
+    renderResults(lintPrompt(promptText), currentPromptSelection ? currentPromptSelection.source : "manual");
+  }, 350);
+}
+
+/**
  * Registers popup events and applies initial state.
  */
 function initializePopup() {
   // Attach button handlers for linting, extraction, copy, and clear.
+  var promptInput = document.getElementById("promptInput");
   document.getElementById("lintButton").addEventListener("click", lintCurrentPrompt);
   document.getElementById("extractButton").addEventListener("click", handleExtractClick);
   document.getElementById("copyButton").addEventListener("click", handleCopyClick);
   document.getElementById("clearButton").addEventListener("click", handleClearClick);
+  promptInput.addEventListener("input", handlePromptInputChange);
+  promptInput.addEventListener("scroll", syncPromptAnnotationScroll);
   chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 
   // Prime status and default result display.

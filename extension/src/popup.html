@@ -13,12 +13,15 @@
 
       <section class="popup__controls">
         <label for="promptInput">Prompt</label>
-        <textarea
-          id="promptInput"
-          data-prompt-input
-          placeholder="Paste a prompt or import it from the page..."
-          spellcheck="false"
-        ></textarea>
+        <div class="prompt-editor">
+          <div id="promptAnnotationLayer" class="prompt-editor__annotations"></div>
+          <textarea
+            id="promptInput"
+            data-prompt-input
+            placeholder="Paste a prompt or import it from the page..."
+            spellcheck="false"
+          ></textarea>
+        </div>
         <button id="lintButton" data-lint-btn type="button">Lint Prompt</button>
       </section>
 

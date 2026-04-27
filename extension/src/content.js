@@ -231,7 +231,7 @@
    * @returns {Element | null} Editable prompt element or null.
    */
   function findEditableTarget(selector) {
-    // Prefer the captured selector so fixes apply to the original field.
+    // Prefer the captured selector so replacements apply to the original field.
     if (selector) {
       try {
         const selectedElement = document.querySelector(selector);
@@ -321,34 +321,327 @@
   }
 
   /**
-   * Creates an apply button for an overlay lint finding.
-   * @param {object} finding - Lint finding with an action payload.
-   * @param {string | undefined} selector - Prompt source selector.
-   * @returns {HTMLButtonElement} Rendered apply button.
+   * Collects overlay underline ranges from lint findings.
+   * @param {Array<object>} findings - Lint findings from the extension.
+   * @returns {Array<object>} Non-overlapping annotation groups.
    */
-  function createOverlayApplyButton(finding, selector) {
-    // Render one-click fix controls like an inline writing assistant.
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = finding?.action?.label || "Apply fix";
-    button.style.marginTop = "6px";
-    button.style.border = "0";
-    button.style.borderRadius = "6px";
-    button.style.background = "#2563eb";
-    button.style.color = "#eff6ff";
-    button.style.padding = "5px 8px";
-    button.style.cursor = "pointer";
-    button.style.fontWeight = "700";
-
-    // Apply the replacement to the original editable prompt field.
-    button.addEventListener("click", () => {
-      const replacement = finding?.action?.replacement || "";
-      if (replacement && applyPromptReplacement(replacement, selector)) {
-        button.textContent = "Applied";
-      }
+  function collectOverlayAnnotationGroups(findings) {
+    // Combine highlights that target the same prompt range.
+    const groupsByRange = new Map();
+    findings.forEach((finding) => {
+      (finding.highlights || []).forEach((highlight) => {
+        const key = `${highlight.start}:${highlight.end}`;
+        const group = groupsByRange.get(key) || {
+          start: highlight.start,
+          end: highlight.end,
+          messages: [],
+          options: []
+        };
+        group.messages.push(highlight.message);
+        group.options = group.options.concat(highlight.options || []);
+        groupsByRange.set(key, group);
+      });
     });
 
-    return button;
+    // Merge overlaps because HTML spans cannot overlap cleanly.
+    const groups = Array.from(groupsByRange.values()).sort((a, b) => a.start - b.start || b.end - a.end);
+    return groups.reduce((merged, group) => {
+      const previous = merged[merged.length - 1];
+      if (previous && group.start < previous.end) {
+        previous.end = Math.max(previous.end, group.end);
+        previous.messages = previous.messages.concat(group.messages);
+        previous.options = previous.options.concat(group.options);
+        return merged;
+      }
+      merged.push(group);
+      return merged;
+    }, []);
+  }
+
+  /**
+   * Creates a hover tooltip for overlay annotations.
+   * @param {Array<string>} messages - Lint messages for this underline.
+   * @param {Array<object>} options - Resolution options for this underline.
+   * @param {string | undefined} selector - Prompt source selector.
+   * @returns {HTMLSpanElement} Tooltip element.
+   */
+  function createOverlayTooltip(messages, options, selector) {
+    // Render clickable options that replace the source prompt field.
+    const tooltip = document.createElement("span");
+    tooltip.style.display = "none";
+    tooltip.style.position = "absolute";
+    tooltip.style.left = "0";
+    tooltip.style.bottom = "100%";
+    tooltip.style.width = "240px";
+    tooltip.style.maxHeight = "220px";
+    tooltip.style.overflowY = "auto";
+    tooltip.style.padding = "6px";
+    tooltip.style.borderRadius = "8px";
+    tooltip.style.background = "#020617";
+    tooltip.style.color = "#f8fafc";
+    tooltip.style.fontSize = "11px";
+    tooltip.style.lineHeight = "1.25";
+    tooltip.style.boxShadow = "0 10px 24px rgba(0,0,0,0.35)";
+    tooltip.style.zIndex = "2147483647";
+    tooltip.addEventListener("wheel", (event) => {
+      // Keep tooltip scrolling from moving the underlying page or editor.
+      event.stopPropagation();
+    });
+
+    const title = createOverlayTextElement("strong", messages.filter(Boolean).join(" "));
+    title.style.display = "block";
+    title.style.marginBottom = "4px";
+    title.style.fontSize = "11px";
+    title.style.lineHeight = "1.25";
+    tooltip.appendChild(title);
+    const seen = new Set();
+    options.forEach((option) => {
+      const key = `${option.label}::${option.description}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${option.label}: ${option.description}`;
+      button.style.display = "block";
+      button.style.width = "100%";
+      button.style.marginTop = "4px";
+      button.style.border = "0";
+      button.style.borderRadius = "6px";
+      button.style.background = "#2563eb";
+      button.style.color = "#eff6ff";
+      button.style.padding = "4px 6px";
+      button.style.textAlign = "left";
+      button.style.cursor = "pointer";
+      button.style.fontSize = "11px";
+      button.style.fontWeight = "600";
+      button.style.lineHeight = "1.25";
+      button.style.whiteSpace = "normal";
+      button.addEventListener("click", (event) => {
+        // Prevent the overlay click from bubbling into page controls.
+        event.preventDefault();
+        event.stopPropagation();
+        if (option.replacement && applyPromptReplacement(option.replacement, selector)) {
+          const fieldOverlay = document.getElementById("prompt-linter-field-overlay");
+          if (fieldOverlay) {
+            fieldOverlay.remove();
+          }
+          button.textContent = "Suggestion applied";
+        }
+      });
+      tooltip.appendChild(button);
+    });
+
+    return tooltip;
+  }
+
+  /**
+   * Keeps an overlay tooltip open during forgiving pointer movement.
+   * @param {HTMLElement} underline - Underlined text span.
+   * @param {HTMLElement} tooltip - Tooltip shown for the underline.
+   */
+  function wireStableOverlayTooltip(underline, tooltip) {
+    // Delay closing so moving into the tooltip does not dismiss it.
+    let closeTimer = null;
+
+    /**
+     * Opens the tooltip and cancels any pending close.
+     */
+    function openTooltip() {
+      // Use inline display because the content script owns these styles.
+      window.clearTimeout(closeTimer);
+      tooltip.style.display = "block";
+    }
+
+    /**
+     * Closes the tooltip after a small grace period.
+     */
+    function scheduleCloseTooltip() {
+      // A small delay tolerates diagonal movement and internal scrolling.
+      window.clearTimeout(closeTimer);
+      closeTimer = window.setTimeout(() => {
+        tooltip.style.display = "none";
+      }, 350);
+    }
+
+    // Keep the tooltip open while either element is hovered.
+    underline.addEventListener("mouseenter", openTooltip);
+    underline.addEventListener("mouseleave", scheduleCloseTooltip);
+    tooltip.addEventListener("mouseenter", openTooltip);
+    tooltip.addEventListener("mouseleave", scheduleCloseTooltip);
+
+    // Keep keyboard focus transitions into tooltip buttons from closing it.
+    underline.addEventListener("focusin", openTooltip);
+    underline.addEventListener("focusout", (event) => {
+      if (!tooltip.contains(event.relatedTarget)) {
+        scheduleCloseTooltip();
+      }
+    });
+    tooltip.addEventListener("focusin", openTooltip);
+    tooltip.addEventListener("focusout", (event) => {
+      if (!underline.contains(event.relatedTarget)) {
+        scheduleCloseTooltip();
+      }
+    });
+  }
+
+  /**
+   * Renders the prompt with red underlines in the page overlay.
+   * @param {string} promptText - Prompt text to annotate.
+   * @param {Array<object>} findings - Lint findings with highlight ranges.
+   * @param {string | undefined} selector - Prompt source selector.
+   * @returns {HTMLDivElement} Annotated prompt container.
+   */
+  function renderOverlayAnnotatedPrompt(promptText, findings, selector) {
+    // Build a read-only annotated view rather than mutating the page prompt.
+    const promptContainer = document.createElement("div");
+    const groups = collectOverlayAnnotationGroups(findings);
+    let cursor = 0;
+    promptContainer.style.whiteSpace = "pre-wrap";
+    promptContainer.style.lineHeight = "1.45";
+    promptContainer.style.border = "1px solid #334155";
+    promptContainer.style.borderRadius = "8px";
+    promptContainer.style.padding = "8px";
+    promptContainer.style.background = "#0b1224";
+
+    groups.forEach((group) => {
+      if (group.start > cursor) {
+        promptContainer.appendChild(document.createTextNode(promptText.slice(cursor, group.start)));
+      }
+
+      const underline = document.createElement("span");
+      const tooltip = createOverlayTooltip(group.messages, group.options, selector);
+      underline.textContent = promptText.slice(group.start, group.end);
+      underline.style.position = "relative";
+      underline.style.textDecorationLine = "underline";
+      underline.style.textDecorationColor = "#ef4444";
+      underline.style.textDecorationStyle = "wavy";
+      underline.style.textDecorationThickness = "2px";
+      underline.style.cursor = "help";
+      underline.tabIndex = 0;
+      underline.appendChild(tooltip);
+      wireStableOverlayTooltip(underline, tooltip);
+      promptContainer.appendChild(underline);
+      cursor = group.end;
+    });
+
+    if (cursor < promptText.length) {
+      promptContainer.appendChild(document.createTextNode(promptText.slice(cursor)));
+    }
+    return promptContainer;
+  }
+
+  /**
+   * Reads prompt text from the original editable field.
+   * @param {Element} element - Editable element to inspect.
+   * @returns {string} Prompt text from the field.
+   */
+  function getFieldPromptText(element) {
+    // Match the extraction behavior for form and rich-text fields.
+    if (element.matches("textarea, input")) {
+      return element.value || "";
+    }
+    return element.textContent || "";
+  }
+
+  /**
+   * Copies relevant text layout styles from the page field.
+   * @param {HTMLElement} layer - Annotation layer to style.
+   * @param {Element} target - Source editable element.
+   */
+  function copyFieldTextStyles(layer, target) {
+    // Align overlay text with the field as closely as the page allows.
+    const styles = window.getComputedStyle(target);
+    layer.style.fontFamily = styles.fontFamily;
+    layer.style.fontSize = styles.fontSize;
+    layer.style.fontWeight = styles.fontWeight;
+    layer.style.lineHeight = styles.lineHeight;
+    layer.style.letterSpacing = styles.letterSpacing;
+    layer.style.padding = styles.padding;
+    layer.style.whiteSpace = target.matches("input") ? "pre" : "pre-wrap";
+  }
+
+  /**
+   * Positions a field annotation layer over its source field.
+   * @param {HTMLElement} layer - Annotation layer to position.
+   * @param {Element} target - Source editable element.
+   */
+  function positionFieldAnnotationLayer(layer, target) {
+    // Use fixed positioning so the layer follows viewport coordinates.
+    const rect = target.getBoundingClientRect();
+    layer.style.left = `${rect.left}px`;
+    layer.style.top = `${rect.top}px`;
+    layer.style.width = `${rect.width}px`;
+    layer.style.height = `${rect.height}px`;
+    layer.scrollTop = target.scrollTop || 0;
+    layer.scrollLeft = target.scrollLeft || 0;
+  }
+
+  /**
+   * Renders red underlines over the actual source prompt field.
+   * @param {string} promptText - Prompt text to annotate.
+   * @param {Array<object>} findings - Lint findings with highlight ranges.
+   * @param {string | undefined} selector - Prompt source selector.
+   */
+  function renderFieldAnnotationLayer(promptText, findings, selector) {
+    // Remove stale field overlays before drawing the latest lint state.
+    const existing = document.getElementById("prompt-linter-field-overlay");
+    if (existing) {
+      existing.remove();
+    }
+
+    // Only annotate editable fields that can be located on the page.
+    const target = findEditableTarget(selector);
+    if (!target) {
+      return;
+    }
+
+    // Build a transparent text mirror with clickable underline spans.
+    const layer = document.createElement("div");
+    const groups = collectOverlayAnnotationGroups(findings);
+    let cursor = 0;
+    layer.id = "prompt-linter-field-overlay";
+    layer.style.position = "fixed";
+    layer.style.zIndex = "2147483646";
+    layer.style.overflow = "visible";
+    layer.style.color = "transparent";
+    layer.style.pointerEvents = "none";
+    layer.style.boxSizing = "border-box";
+    copyFieldTextStyles(layer, target);
+    positionFieldAnnotationLayer(layer, target);
+
+    groups.forEach((group) => {
+      if (group.start > cursor) {
+        layer.appendChild(document.createTextNode(promptText.slice(cursor, group.start)));
+      }
+
+      const underline = document.createElement("span");
+      const tooltip = createOverlayTooltip(group.messages, group.options, selector);
+      underline.textContent = promptText.slice(group.start, group.end);
+      underline.style.position = "relative";
+      underline.style.textDecorationLine = "underline";
+      underline.style.textDecorationColor = "#ef4444";
+      underline.style.textDecorationStyle = "wavy";
+      underline.style.textDecorationThickness = "2px";
+      underline.style.cursor = "help";
+      underline.style.pointerEvents = "auto";
+      underline.tabIndex = 0;
+      underline.appendChild(tooltip);
+      wireStableOverlayTooltip(underline, tooltip);
+      layer.appendChild(underline);
+      cursor = group.end;
+    });
+
+    if (cursor < promptText.length) {
+      layer.appendChild(document.createTextNode(promptText.slice(cursor)));
+    }
+
+    // Keep the underline layer aligned as the user scrolls or the page moves.
+    target.addEventListener("scroll", () => positionFieldAnnotationLayer(layer, target), { passive: true });
+    window.addEventListener("scroll", () => positionFieldAnnotationLayer(layer, target), { passive: true });
+    window.addEventListener("resize", () => positionFieldAnnotationLayer(layer, target), { passive: true });
+    document.body.appendChild(layer);
   }
 
   /**
@@ -380,9 +673,12 @@
     container.style.boxShadow = "0 10px 30px rgba(0,0,0,0.35)";
     container.style.zIndex = "2147483647";
 
-    // Include headline metrics and top findings.
+    // Include headline metrics and annotated prompt findings.
     const findings = Array.isArray(payload?.analysis?.findings) ? payload.analysis.findings.slice(0, 4) : [];
+    const promptText = String(payload?.promptText || payload?.selection?.text || "");
     const selector = payload?.selection?.selector;
+    const target = findEditableTarget(selector);
+    const fieldPromptText = target ? getFieldPromptText(target) : promptText;
     const header = document.createElement("div");
     header.style.display = "flex";
     header.style.justifyContent = "space-between";
@@ -407,28 +703,17 @@
     score.style.marginBottom = "6px";
     const severity = createOverlayTextElement("div", `Severity: ${payload?.analysis?.severity ?? "-"}`);
     severity.style.marginBottom = "8px";
-    const findingsTitle = createOverlayTextElement("div", "Fix suggestions");
+    const findingsTitle = createOverlayTextElement("div", "Hover underlined text for resolution options");
     findingsTitle.style.fontWeight = "600";
     findingsTitle.style.marginBottom = "4px";
-    const findingsList = document.createElement("ul");
-    findingsList.style.margin = "0";
-    findingsList.style.paddingLeft = "18px";
-
-    findings.forEach((finding) => {
-      const item = document.createElement("li");
-      const message = createOverlayTextElement("div", finding.message);
-      item.appendChild(message);
-      if (finding.action && finding.action.replacement) {
-        item.appendChild(createOverlayApplyButton(finding, selector));
-      }
-      findingsList.appendChild(item);
-    });
+    const annotatedPrompt = renderOverlayAnnotatedPrompt(fieldPromptText, findings, selector);
+    renderFieldAnnotationLayer(fieldPromptText, findings, selector);
 
     container.appendChild(header);
     container.appendChild(score);
     container.appendChild(severity);
     container.appendChild(findingsTitle);
-    container.appendChild(findingsList);
+    container.appendChild(annotatedPrompt);
 
     // Insert into document.
     document.body.appendChild(container);
