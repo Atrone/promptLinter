@@ -1,3 +1,5 @@
+import { lintPrompt } from "./linter.js";
+
 /**
  * Gets the active tab in the current window.
  * @returns {Promise<chrome.tabs.Tab | null>} Active tab or null.
@@ -39,6 +41,102 @@ async function renderOverlayOnTab(tabId, payload) {
 }
 
 /**
+ * Saves the latest auto-detected prompt for the popup.
+ * @param {number} tabId - Tab where the prompt was detected.
+ * @param {object} selection - Prompt selection metadata.
+ * @returns {Promise<void>} Promise resolved after storage update.
+ */
+async function saveDetectedPrompt(tabId, selection) {
+  // Keep only the latest prompt detection so popup startup remains simple.
+  await chrome.storage.local.set({
+    promptLinterAutoExtract: {
+      tabId: tabId,
+      detectedAt: Date.now(),
+      selection: selection || null
+    }
+  });
+}
+
+/**
+ * Notifies any open popup that the active page has a prompt ready to extract.
+ * @param {number} tabId - Tab where the prompt was detected.
+ * @returns {Promise<void>} Promise resolved after notification attempt.
+ */
+async function notifyPopupPromptDetected(tabId) {
+  // Runtime messaging fails when the popup is closed, which is expected.
+  try {
+    await chrome.runtime.sendMessage({
+      action: "RUN_EXTRACT_FROM_PAGE",
+      tabId: tabId
+    });
+  } catch (_error) {
+    // Closed popups cannot receive messages; stored state covers next open.
+  }
+}
+
+/**
+ * Marks the extension action to show that a prompt was detected on the page.
+ * @param {number} tabId - Tab where the prompt was detected.
+ * @returns {Promise<void>} Promise resolved after badge update.
+ */
+async function markPromptDetected(tabId) {
+  // Give the user a subtle cue when the popup is not currently open.
+  await chrome.action.setBadgeText({ tabId: tabId, text: "!" });
+  await chrome.action.setBadgeBackgroundColor({ tabId: tabId, color: "#3b82f6" });
+}
+
+/**
+ * Computes an overall severity label from issue collection.
+ * @param {Array<{severity:string}>} issues - Linter issue list.
+ * @returns {"high"|"medium"|"low"|"none"} Highest severity present.
+ */
+function getOverallSeverity(issues) {
+  // Promote the most severe issue for badge and overlay display.
+  if (issues.some(function hasHigh(item) { return item.severity === "high"; })) {
+    return "high";
+  }
+  if (issues.some(function hasMedium(item) { return item.severity === "medium"; })) {
+    return "medium";
+  }
+  if (issues.length > 0) {
+    return "low";
+  }
+  return "none";
+}
+
+/**
+ * Runs the existing extract, lint, and overlay workflow for a detected prompt.
+ * @param {number} tabId - Tab where the prompt was detected.
+ * @param {string} promptText - Prompt text detected from the page.
+ * @returns {Promise<void>} Promise resolved after workflow attempt.
+ */
+async function runAutomaticExtractWorkflow(tabId, promptText) {
+  // Reuse content extraction so detection follows the same source rules as the button.
+  const collectedPrompt = await collectPromptFromTab(tabId, promptText || "");
+  if (!collectedPrompt || !collectedPrompt.ok || !collectedPrompt.selection || !collectedPrompt.selection.text) {
+    return;
+  }
+
+  // Lint the extracted prompt and shape the payload expected by the overlay.
+  const lintResult = lintPrompt(collectedPrompt.selection.text);
+  await renderOverlayOnTab(tabId, {
+    analysis: {
+      score: lintResult.score,
+      severity: getOverallSeverity(lintResult.issues),
+      findings: lintResult.issues.map(function mapIssue(issue) {
+        // Keep overlay findings compact while preserving apply actions.
+        return {
+          message: issue.message,
+          severity: issue.severity,
+          action: issue.action
+        };
+      })
+    },
+    selection: collectedPrompt.selection
+  });
+}
+
+/**
  * Registers install-time setup logging.
  */
 chrome.runtime.onInstalled.addListener(() => {
@@ -68,6 +166,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         sendResponse({ ok: true, selection: selection.selection });
+        return;
+      }
+
+      if (message && message.action === "PROMPT_WRITTEN_DETECTED") {
+        // Store and broadcast prompt detection from content scripts.
+        const tabId = _sender && _sender.tab ? _sender.tab.id : null;
+        if (typeof tabId !== "number") {
+          sendResponse({ ok: false, error: "No source tab available." });
+          return;
+        }
+
+        await saveDetectedPrompt(tabId, message.selection || null);
+        await markPromptDetected(tabId);
+        await notifyPopupPromptDetected(tabId);
+        try {
+          // Run extraction immediately even when the popup is closed.
+          await runAutomaticExtractWorkflow(tabId, message.selection ? message.selection.text : "");
+        } catch (_error) {
+          // Popup/manual extraction remains available if automatic overlay fails.
+        }
+        sendResponse({ ok: true });
         return;
       }
 

@@ -1,5 +1,9 @@
 import { lintPrompt, buildImprovedPrompt } from "./linter.js";
 
+var AUTO_EXTRACT_MAX_AGE_MS = 5 * 60 * 1000;
+var autoExtractInProgress = false;
+var currentPromptSelection = null;
+
 /**
  * Maps score numbers into user-facing quality tones.
  * @param {number} score - Prompt score from 0 to 100.
@@ -69,6 +73,43 @@ function createListItem(title, body) {
 }
 
 /**
+ * Creates a card item with an applyable lint fix.
+ * @param {object} issue - Lint issue with action metadata.
+ * @param {number} index - Display index for the issue.
+ * @returns {HTMLLIElement} Rendered issue action element.
+ */
+function createIssueActionItem(issue, index) {
+  // Build the card using DOM nodes so action text remains safe.
+  var item = document.createElement("li");
+  item.className = "card";
+
+  var heading = document.createElement("h3");
+  heading.textContent = (index + 1) + ". " + issue.rule + " (" + String(issue.severity).toUpperCase() + ")";
+
+  var paragraph = document.createElement("p");
+  paragraph.textContent = issue.message + " Fix: " + issue.fix;
+
+  var actionDescription = document.createElement("p");
+  actionDescription.className = "card__action-description";
+  actionDescription.textContent = issue.action && issue.action.description ? issue.action.description : "Apply a suggested rewrite.";
+
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "card__action";
+  button.textContent = issue.action && issue.action.label ? issue.action.label : "Apply fix";
+  button.addEventListener("click", function handleApplyClick() {
+    // Apply the issue rewrite to the prompt and refresh lint output.
+    applyIssueAction(issue);
+  });
+
+  item.appendChild(heading);
+  item.appendChild(paragraph);
+  item.appendChild(actionDescription);
+  item.appendChild(button);
+  return item;
+}
+
+/**
  * Computes an overall severity label from issue collection.
  * @param {Array<{severity:string}>} issues - Linter issue list.
  * @returns {"high"|"medium"|"low"|"none"} Highest severity present.
@@ -100,6 +141,58 @@ async function sendMessageToActiveTab(message) {
     throw new Error("No active tab found.");
   }
   return chrome.tabs.sendMessage(activeTab.id, message);
+}
+
+/**
+ * Resolves the active tab identifier for popup-scoped actions.
+ * @returns {Promise<number | null>} Active tab identifier or null.
+ */
+async function getActiveTabId() {
+  // Match the tab lookup used by active-page extraction.
+  var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  var activeTab = tabs[0];
+  return activeTab && typeof activeTab.id === "number" ? activeTab.id : null;
+}
+
+/**
+ * Reads the latest prompt auto-detection record from extension storage.
+ * @returns {Promise<object | null>} Stored auto-extract record or null.
+ */
+async function getPendingAutoExtract() {
+  // Storage is populated by the background script when content detects typing.
+  var result = await chrome.storage.local.get("promptLinterAutoExtract");
+  return result && result.promptLinterAutoExtract ? result.promptLinterAutoExtract : null;
+}
+
+/**
+ * Clears prompt auto-detection state for a tab.
+ * @param {number} tabId - Tab identifier to clear.
+ * @returns {Promise<void>} Promise resolved after state is cleared.
+ */
+async function clearAutoExtractState(tabId) {
+  // Remove pending storage so stale detections do not rerun later.
+  await chrome.storage.local.remove("promptLinterAutoExtract");
+
+  // Clear the badge cue for the page after extraction is handled.
+  if (typeof tabId === "number") {
+    await chrome.action.setBadgeText({ tabId: tabId, text: "" });
+  }
+}
+
+/**
+ * Checks whether an auto-detection record applies to the current active tab.
+ * @param {object | null} record - Stored auto-detection record.
+ * @param {number | null} tabId - Current active tab identifier.
+ * @returns {boolean} Whether auto extraction should run.
+ */
+function shouldRunAutoExtract(record, tabId) {
+  // Only run for fresh detections on the tab the popup is inspecting.
+  if (!record || typeof tabId !== "number" || record.tabId !== tabId) {
+    return false;
+  }
+
+  // Ignore old detections that may no longer match the page content.
+  return Date.now() - Number(record.detectedAt || 0) <= AUTO_EXTRACT_MAX_AGE_MS;
 }
 
 /**
@@ -141,12 +234,7 @@ function renderResults(lintResult, sourceLabel) {
     issuesList.appendChild(createListItem("No issues detected", "Prompt structure looks strong."));
   } else {
     sortedIssues.forEach(function renderIssue(issue, index) {
-      issuesList.appendChild(
-        createListItem(
-          (index + 1) + ". " + issue.rule + " (" + String(issue.severity).toUpperCase() + ")",
-          issue.message + " Fix: " + issue.fix
-        )
-      );
+      issuesList.appendChild(createIssueActionItem(issue, index));
     });
   }
 
@@ -171,9 +259,54 @@ function lintCurrentPrompt() {
   // Gather prompt text and run lint rules.
   var promptText = document.getElementById("promptInput").value;
   var lintResult = lintPrompt(promptText);
+  currentPromptSelection = null;
   renderResults(lintResult, "manual");
   setStatus("Lint complete.");
   return lintResult;
+}
+
+/**
+ * Applies replacement prompt text to the active page when possible.
+ * @param {string} promptText - Replacement prompt text.
+ * @returns {Promise<void>} Promise resolved after page update attempt.
+ */
+async function applyPromptToActivePage(promptText) {
+  // Skip page updates for prompts typed directly in the popup.
+  if (!currentPromptSelection || !currentPromptSelection.selector) {
+    return;
+  }
+
+  // Ask the content script to update the original prompt field.
+  await sendMessageToActiveTab({
+    action: "APPLY_PROMPT_TEXT",
+    payload: {
+      text: promptText,
+      selector: currentPromptSelection.selector
+    }
+  });
+}
+
+/**
+ * Applies a selected issue action to the current prompt.
+ * @param {object} issue - Lint issue with action metadata.
+ */
+function applyIssueAction(issue) {
+  // Ignore malformed issue actions defensively.
+  if (!issue || !issue.action || !issue.action.replacement) {
+    return;
+  }
+
+  // Update the popup prompt first so feedback is immediate.
+  var promptInput = document.getElementById("promptInput");
+  promptInput.value = issue.action.replacement;
+  var lintResult = lintPrompt(promptInput.value);
+  renderResults(lintResult, currentPromptSelection ? currentPromptSelection.source : "manual");
+  setStatus("Fix applied.");
+
+  // Mirror the fix back to the source page when the prompt was extracted.
+  applyPromptToActivePage(promptInput.value).catch(function handleApplyError(error) {
+    setStatus("Fix applied in popup. Page update failed: " + error.message);
+  });
 }
 
 /**
@@ -190,6 +323,7 @@ async function extractFromPage() {
 
   // Populate textarea and lint extracted text.
   var extractedPrompt = response.selection && response.selection.text ? response.selection.text : "";
+  currentPromptSelection = response.selection || null;
   document.getElementById("promptInput").value = extractedPrompt;
   var lintResult = lintPrompt(extractedPrompt);
   renderResults(lintResult, (response.selection && response.selection.source) || "page");
@@ -207,10 +341,12 @@ async function extractFromPage() {
             // Map issue fields to the overlay shape.
             return {
               message: issue.message,
-              severity: issue.severity
+              severity: issue.severity,
+              action: issue.action
             };
           })
-        }
+        },
+        selection: response.selection || null
       }
     });
   } catch (_error) {
@@ -236,6 +372,7 @@ async function copyImprovedPrompt() {
  */
 function clearAll(updateStatus) {
   // Reset prompt field and summary widgets to defaults.
+  currentPromptSelection = null;
   document.getElementById("promptInput").value = "";
   document.getElementById("scoreValue").textContent = "--";
   document.getElementById("scoreTone").textContent = "Run lint to score this prompt.";
@@ -261,6 +398,65 @@ async function handleExtractClick() {
   } catch (error) {
     setStatus("Extract failed: " + error.message);
   }
+}
+
+/**
+ * Runs the extract workflow in response to page-side prompt detection.
+ * @param {number} detectedTabId - Tab where the prompt was detected.
+ * @returns {Promise<void>} Promise resolved when auto extraction finishes.
+ */
+async function runAutoExtractForTab(detectedTabId) {
+  // Avoid overlapping extraction attempts while the user is still typing.
+  if (autoExtractInProgress) {
+    return;
+  }
+
+  autoExtractInProgress = true;
+  try {
+    // Ensure the popup still points at the tab that raised the detection.
+    var activeTabId = await getActiveTabId();
+    if (activeTabId !== detectedTabId) {
+      return;
+    }
+
+    await extractFromPage();
+    await clearAutoExtractState(detectedTabId);
+  } catch (error) {
+    // Surface auto-extract failures without breaking manual controls.
+    setStatus("Auto extract failed: " + error.message);
+  } finally {
+    // Allow future detections to trigger fresh extraction.
+    autoExtractInProgress = false;
+  }
+}
+
+/**
+ * Handles prompt-detected messages while the popup is open.
+ * @param {object} message - Runtime message payload.
+ */
+function handleRuntimeMessage(message) {
+  // Route only auto-extract notifications intended for the current popup.
+  if (!message || message.action !== "RUN_EXTRACT_FROM_PAGE") {
+    return;
+  }
+
+  // Run asynchronously because Chrome message listeners are synchronous here.
+  runAutoExtractForTab(message.tabId);
+}
+
+/**
+ * Runs any pending auto extraction saved before the popup opened.
+ * @returns {Promise<void>} Promise resolved after pending check.
+ */
+async function runPendingAutoExtract() {
+  // Compare stored detection metadata with the active tab.
+  var activeTabId = await getActiveTabId();
+  var pendingAutoExtract = await getPendingAutoExtract();
+  if (!shouldRunAutoExtract(pendingAutoExtract, activeTabId)) {
+    return;
+  }
+
+  await runAutoExtractForTab(activeTabId);
 }
 
 /**
@@ -293,10 +489,12 @@ function initializePopup() {
   document.getElementById("extractButton").addEventListener("click", handleExtractClick);
   document.getElementById("copyButton").addEventListener("click", handleCopyClick);
   document.getElementById("clearButton").addEventListener("click", handleClearClick);
+  chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 
   // Prime status and default result display.
   clearAll(false);
   setStatus("Ready.");
+  runPendingAutoExtract();
 }
 
 initializePopup();

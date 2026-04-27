@@ -14,15 +14,17 @@ function normalizePrompt(promptText) {
  * @param {"high"|"medium"|"low"} severity - Issue severity.
  * @param {string} message - Human readable issue message.
  * @param {string} fix - Recommended prompt improvement.
- * @returns {{rule:string,severity:string,message:string,fix:string}} Lint issue object.
+ * @param {{label:string,description:string,replacement:string}} action - Applyable prompt fix.
+ * @returns {{rule:string,severity:string,message:string,fix:string,action:object}} Lint issue object.
  */
-function createIssue(rule, severity, message, fix) {
+function createIssue(rule, severity, message, fix, action) {
   // Keep issue shape consistent for popup rendering.
   return {
     rule,
     severity,
     message,
-    fix
+    fix,
+    action
   };
 }
 
@@ -170,6 +172,154 @@ function buildImprovedPrompt(promptText) {
 }
 
 /**
+ * Adds a structured section to the end of a prompt.
+ * @param {string} promptText - Current prompt text.
+ * @param {string} heading - Section heading to append.
+ * @param {Array<string>} lines - Section body lines.
+ * @returns {string} Prompt text with the appended section.
+ */
+function appendPromptSection(promptText, heading, lines) {
+  // Normalize spacing before adding a new improvement block.
+  const normalizedPrompt = normalizePrompt(promptText);
+  const section = [heading].concat(lines).join("\n");
+
+  // Return just the section when the original prompt is empty.
+  if (!normalizedPrompt) {
+    return section;
+  }
+
+  // Separate the new section clearly from existing prompt text.
+  return normalizedPrompt + "\n\n" + section;
+}
+
+/**
+ * Replaces vague wording with more specific placeholders.
+ * @param {string} promptText - Current prompt text.
+ * @returns {string} Prompt text with vague terms clarified.
+ */
+function replaceVagueLanguage(promptText) {
+  // Swap common vague terms for concrete language prompts.
+  const replacements = {
+    stuff: "specific details",
+    things: "requirements",
+    something: "a concrete outcome",
+    maybe: "when appropriate",
+    etc: "named additional requirements"
+  };
+
+  // Preserve the rest of the user's prompt while changing only weak terms.
+  return normalizePrompt(promptText).replace(/\b(stuff|things|something|maybe|etc)\b/gi, (match) => {
+    return replacements[match.toLowerCase()] || match;
+  });
+}
+
+/**
+ * Builds an applyable fix option for a lint issue.
+ * @param {string} rule - Rule identifier.
+ * @param {string} promptText - Current prompt text.
+ * @returns {{label:string,description:string,replacement:string}} Fix option for UI actions.
+ */
+function buildIssueAction(rule, promptText) {
+  // Normalize once so each fix starts from the same prompt text.
+  const normalizedPrompt = normalizePrompt(promptText);
+
+  // Build a deterministic rewrite for each rule.
+  if (rule === "empty-prompt") {
+    return {
+      label: "Insert starter prompt",
+      description: "Adds a complete prompt scaffold.",
+      replacement: buildImprovedPrompt("")
+    };
+  }
+
+  if (rule === "prompt-too-short") {
+    return {
+      label: "Add detail placeholders",
+      description: "Adds context, success criteria, and depth guidance.",
+      replacement: appendPromptSection(normalizedPrompt, "Details to include:", [
+        "- Context: [describe the situation and audience].",
+        "- Success criteria: [describe what a good answer must include].",
+        "- Depth: Keep the answer concise but include concrete next steps."
+      ])
+    };
+  }
+
+  if (rule === "low-structure") {
+    return {
+      label: "Convert to structured prompt",
+      description: "Wraps the prompt in Role, Goal, Context, Requirements, and Output Format sections.",
+      replacement: buildImprovedPrompt(normalizedPrompt)
+    };
+  }
+
+  if (rule === "missing-role") {
+    return {
+      label: "Add role",
+      description: "Adds expert role framing before the prompt.",
+      replacement: "You are an expert assistant in this domain.\n\n" + normalizedPrompt
+    };
+  }
+
+  if (rule === "missing-objective") {
+    return {
+      label: "Clarify objective",
+      description: "Adds an explicit task objective.",
+      replacement: appendPromptSection(normalizedPrompt, "Task objective:", [
+        "Analyze the request and provide a clear, useful response."
+      ])
+    };
+  }
+
+  if (rule === "missing-context") {
+    return {
+      label: "Add context",
+      description: "Adds audience and background guidance.",
+      replacement: appendPromptSection(normalizedPrompt, "Context:", [
+        "Audience: General readers.",
+        "Background: Use the information in the prompt and state assumptions when details are missing."
+      ])
+    };
+  }
+
+  if (rule === "missing-constraints") {
+    return {
+      label: "Add constraints",
+      description: "Adds boundaries for length, claims, and assumptions.",
+      replacement: appendPromptSection(normalizedPrompt, "Requirements:", [
+        "- Keep the answer concise and actionable.",
+        "- Avoid unsupported claims.",
+        "- Include assumptions when information is missing."
+      ])
+    };
+  }
+
+  if (rule === "missing-output-format") {
+    return {
+      label: "Add output format",
+      description: "Adds markdown section formatting.",
+      replacement: appendPromptSection(normalizedPrompt, "Output format:", [
+        "Return markdown with sections: Summary, Details, and Next Steps."
+      ])
+    };
+  }
+
+  if (rule === "vague-language") {
+    return {
+      label: "Clarify vague wording",
+      description: "Replaces vague words with more concrete wording.",
+      replacement: replaceVagueLanguage(normalizedPrompt)
+    };
+  }
+
+  // Fall back to the full prompt scaffold for unknown rule actions.
+  return {
+    label: "Improve prompt",
+    description: "Applies the structured prompt template.",
+    replacement: buildImprovedPrompt(normalizedPrompt)
+  };
+}
+
+/**
  * Runs all lint rules and returns scoring plus suggestions.
  * @param {string} promptText - Raw prompt text to lint.
  * @returns {{
@@ -195,7 +345,8 @@ function lintPrompt(promptText) {
         "empty-prompt",
         "high",
         "Prompt is empty.",
-        "Start with the task objective, then add context, constraints, and output format."
+        "Start with the task objective, then add context, constraints, and output format.",
+        buildIssueAction("empty-prompt", normalizedPrompt)
       )
     );
   }
@@ -207,7 +358,8 @@ function lintPrompt(promptText) {
         "prompt-too-short",
         "high",
         "Prompt is too short to be reliably interpreted.",
-        "Add domain context, required depth, and success criteria."
+        "Add domain context, required depth, and success criteria.",
+        buildIssueAction("prompt-too-short", normalizedPrompt)
       )
     );
   }
@@ -219,7 +371,8 @@ function lintPrompt(promptText) {
         "low-structure",
         "medium",
         "Prompt has little structure.",
-        "Use sections such as Role, Goal, Constraints, and Output Format."
+        "Use sections such as Role, Goal, Constraints, and Output Format.",
+        buildIssueAction("low-structure", normalizedPrompt)
       )
     );
   }
@@ -231,7 +384,8 @@ function lintPrompt(promptText) {
         "missing-role",
         "medium",
         "No role or persona instruction detected.",
-        "Add a role statement, for example: \"You are a senior product analyst.\""
+        "Add a role statement, for example: \"You are a senior product analyst.\"",
+        buildIssueAction("missing-role", normalizedPrompt)
       )
     );
   }
@@ -243,7 +397,8 @@ function lintPrompt(promptText) {
         "missing-objective",
         "medium",
         "Task objective is unclear.",
-        "Use a clear action verb such as build, analyze, compare, or explain."
+        "Use a clear action verb such as build, analyze, compare, or explain.",
+        buildIssueAction("missing-objective", normalizedPrompt)
       )
     );
   }
@@ -255,7 +410,8 @@ function lintPrompt(promptText) {
         "missing-context",
         "medium",
         "Context or audience details are missing.",
-        "Add background details and who the output is intended for."
+        "Add background details and who the output is intended for.",
+        buildIssueAction("missing-context", normalizedPrompt)
       )
     );
   }
@@ -267,7 +423,8 @@ function lintPrompt(promptText) {
         "missing-constraints",
         "low",
         "No explicit constraints detected.",
-        "Specify boundaries such as length, exclusions, and required inclusions."
+        "Specify boundaries such as length, exclusions, and required inclusions.",
+        buildIssueAction("missing-constraints", normalizedPrompt)
       )
     );
   }
@@ -279,7 +436,8 @@ function lintPrompt(promptText) {
         "missing-output-format",
         "medium",
         "Output format is not specified.",
-        "Request a concrete format like JSON, table, bullets, or markdown sections."
+        "Request a concrete format like JSON, table, bullets, or markdown sections.",
+        buildIssueAction("missing-output-format", normalizedPrompt)
       )
     );
   }
@@ -291,7 +449,8 @@ function lintPrompt(promptText) {
         "vague-language",
         "low",
         "Prompt contains ambiguous wording.",
-        "Replace vague terms with measurable requirements and examples."
+        "Replace vague terms with measurable requirements and examples.",
+        buildIssueAction("vague-language", normalizedPrompt)
       )
     );
   }
