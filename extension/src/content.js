@@ -679,6 +679,10 @@
 
     // Include headline metrics and the prompt problems only.
     const findings = Array.isArray(payload?.analysis?.findings) ? payload.analysis.findings.slice(0, 4) : [];
+    const promptText = String(payload?.promptText || payload?.selection?.text || "");
+    const selector = payload?.selection?.selector;
+    const target = findEditableTarget(selector);
+    const fieldPromptText = target ? getFieldPromptText(target) : promptText;
     const header = document.createElement("div");
     header.style.display = "flex";
     header.style.justifyContent = "space-between";
@@ -725,6 +729,7 @@
         findingsList.appendChild(item);
       });
     }
+    renderFieldAnnotationLayer(fieldPromptText, findings, selector);
 
     container.appendChild(header);
     container.appendChild(score);
