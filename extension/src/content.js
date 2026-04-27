@@ -5,8 +5,10 @@
 (function promptLinterContentScript() {
   const MIN_AUTODETECT_PROMPT_LENGTH = 20;
   const AUTODETECT_DEBOUNCE_MS = 700;
+  const CHATGPT_EXTRACT_POLL_INTERVAL_MS = 5000;
   let promptDetectionTimer = null;
   let lastDetectedPromptText = "";
+  let chatGptPollInProgress = false;
 
   /**
    * Reads currently selected page text.
@@ -305,6 +307,52 @@
     setEditableText(target, promptText);
     lastDetectedPromptText = String(promptText || "").trim();
     return true;
+  }
+
+  /**
+   * Checks whether this content script is running on ChatGPT.
+   * @returns {boolean} Whether the current page host is ChatGPT.
+   */
+  function isChatGptPage() {
+    // Match the first-party ChatGPT domain and any official subdomains.
+    const hostname = window.location.hostname.toLowerCase();
+    return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com");
+  }
+
+  /**
+   * Requests the background extract workflow during ChatGPT polling.
+   * @returns {Promise<void>} Promise resolved after the poll attempt.
+   */
+  async function runChatGptExtractPoll() {
+    // Avoid concurrent extraction if the previous poll is still running.
+    if (chatGptPollInProgress) {
+      return;
+    }
+
+    chatGptPollInProgress = true;
+    try {
+      // Ask the background worker to reuse the existing page extraction workflow.
+      await chrome.runtime.sendMessage({
+        action: "RUN_EXTRACT_PROMPT_FROM_PAGE_WORKFLOW"
+      });
+    } catch (_error) {
+      // Polling can race with reloads or extension restarts, so failures are non-fatal.
+    } finally {
+      // Allow the next interval tick to run a fresh extraction attempt.
+      chatGptPollInProgress = false;
+    }
+  }
+
+  /**
+   * Starts periodic prompt extraction for ChatGPT pages.
+   */
+  function startChatGptExtractPoller() {
+    // Keep polling scoped to ChatGPT so other pages retain event-driven behavior.
+    if (!isChatGptPage()) {
+      return;
+    }
+
+    window.setInterval(runChatGptExtractPoll, CHATGPT_EXTRACT_POLL_INTERVAL_MS);
   }
 
   /**
@@ -773,4 +821,5 @@
 
   // Listen in capture phase so dynamically rendered editors are detected.
   document.addEventListener("input", handlePromptInput, true);
+  startChatGptExtractPoller();
 })();

@@ -378,13 +378,17 @@ function findVagueLanguageRanges(promptText) {
  * @returns {{start:number,end:number} | null} Range to underline, or null.
  */
 function getPromptHighlightRange(promptText) {
-  // Missing structural pieces apply to the authored prompt as a whole.
+  // Missing structural pieces are surfaced on the first word to avoid noisy full-prompt underlines.
   if (!promptText) {
     return null;
   }
+  const firstWord = /\S+/.exec(promptText);
+  if (!firstWord) {
+    return null;
+  }
   return {
-    start: 0,
-    end: promptText.length
+    start: firstWord.index,
+    end: firstWord.index + firstWord[0].length
   };
 }
 

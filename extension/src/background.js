@@ -152,6 +152,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // Process asynchronously to support tab messaging.
   (async () => {
     try {
+      if (message && message.action === "RUN_EXTRACT_PROMPT_FROM_PAGE_WORKFLOW") {
+        // Run the page extraction workflow for the tab that requested polling.
+        const tabId = _sender && _sender.tab ? _sender.tab.id : null;
+        if (typeof tabId !== "number") {
+          sendResponse({ ok: false, error: "No source tab available." });
+          return;
+        }
+
+        await runAutomaticExtractWorkflow(tabId, "");
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (message && message.action === "GET_PROMPT_FROM_ACTIVE_TAB") {
         // Resolve currently active tab for prompt collection.
         const tab = await getActiveTab();
