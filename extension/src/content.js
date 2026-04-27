@@ -654,6 +654,10 @@
     if (existing) {
       existing.remove();
     }
+    const existingFieldOverlay = document.getElementById("prompt-linter-field-overlay");
+    if (existingFieldOverlay) {
+      existingFieldOverlay.remove();
+    }
 
     // Build simple fixed panel for immediate feedback.
     const container = document.createElement("div");
@@ -673,12 +677,8 @@
     container.style.boxShadow = "0 10px 30px rgba(0,0,0,0.35)";
     container.style.zIndex = "2147483647";
 
-    // Include headline metrics and annotated prompt findings.
+    // Include headline metrics and the prompt problems only.
     const findings = Array.isArray(payload?.analysis?.findings) ? payload.analysis.findings.slice(0, 4) : [];
-    const promptText = String(payload?.promptText || payload?.selection?.text || "");
-    const selector = payload?.selection?.selector;
-    const target = findEditableTarget(selector);
-    const fieldPromptText = target ? getFieldPromptText(target) : promptText;
     const header = document.createElement("div");
     header.style.display = "flex";
     header.style.justifyContent = "space-between";
@@ -703,17 +703,34 @@
     score.style.marginBottom = "6px";
     const severity = createOverlayTextElement("div", `Severity: ${payload?.analysis?.severity ?? "-"}`);
     severity.style.marginBottom = "8px";
-    const findingsTitle = createOverlayTextElement("div", "Hover underlined text for resolution options");
+    const findingsTitle = createOverlayTextElement("div", "Prompt problems");
     findingsTitle.style.fontWeight = "600";
-    findingsTitle.style.marginBottom = "4px";
-    const annotatedPrompt = renderOverlayAnnotatedPrompt(fieldPromptText, findings, selector);
-    renderFieldAnnotationLayer(fieldPromptText, findings, selector);
+    findingsTitle.style.marginBottom = "6px";
+
+    const findingsList = document.createElement("ul");
+    findingsList.style.margin = "0";
+    findingsList.style.padding = "0 0 0 16px";
+    findingsList.style.display = "flex";
+    findingsList.style.flexDirection = "column";
+    findingsList.style.gap = "6px";
+
+    if (findings.length === 0) {
+      const emptyItem = createOverlayTextElement("li", "No problems detected.");
+      findingsList.appendChild(emptyItem);
+    } else {
+      findings.forEach((finding) => {
+        // Keep the overlay focused on issues instead of interactive fixes.
+        const severityLabel = finding.severity ? `${String(finding.severity).toUpperCase()}: ` : "";
+        const item = createOverlayTextElement("li", `${severityLabel}${finding.message || "Prompt issue detected."}`);
+        findingsList.appendChild(item);
+      });
+    }
 
     container.appendChild(header);
     container.appendChild(score);
     container.appendChild(severity);
     container.appendChild(findingsTitle);
-    container.appendChild(annotatedPrompt);
+    container.appendChild(findingsList);
 
     // Insert into document.
     document.body.appendChild(container);
