@@ -9,6 +9,7 @@
   let promptDetectionTimer = null;
   let lastDetectedPromptText = "";
   let chatGptPollInProgress = false;
+  let chatGptPollTimer = null;
 
   /**
    * Reads currently selected page text.
@@ -348,11 +349,26 @@
    */
   function startChatGptExtractPoller() {
     // Keep polling scoped to ChatGPT so other pages retain event-driven behavior.
-    if (!isChatGptPage()) {
+    if (!isChatGptPage() || chatGptPollTimer !== null) {
       return;
     }
 
-    window.setInterval(runChatGptExtractPoll, CHATGPT_EXTRACT_POLL_INTERVAL_MS);
+    // Store the timer so the close button can shut polling down.
+    chatGptPollTimer = window.setInterval(runChatGptExtractPoll, CHATGPT_EXTRACT_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Stops periodic prompt extraction for ChatGPT pages.
+   */
+  function stopChatGptExtractPoller() {
+    // Ignore duplicate close attempts after polling has already stopped.
+    if (chatGptPollTimer === null) {
+      return;
+    }
+
+    // Clear the active interval and mark polling as inactive.
+    window.clearInterval(chatGptPollTimer);
+    chatGptPollTimer = null;
   }
 
   /**
@@ -696,6 +712,9 @@
    * Removes both the fixed analysis popup and the field underline layer.
    */
   function closeOverlay() {
+    // Stop automatic polling when the user dismisses the on-page popup.
+    stopChatGptExtractPoller();
+
     // Clear the popup panel if it is still mounted.
     const overlay = document.getElementById("prompt-linter-overlay");
     if (overlay) {
