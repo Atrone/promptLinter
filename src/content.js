@@ -693,6 +693,23 @@
   }
 
   /**
+   * Removes both the fixed analysis popup and the field underline layer.
+   */
+  function closeOverlay() {
+    // Clear the popup panel if it is still mounted.
+    const overlay = document.getElementById("prompt-linter-overlay");
+    if (overlay) {
+      overlay.remove();
+    }
+
+    // Clear the independent field layer that renders red underlines.
+    const fieldOverlay = document.getElementById("prompt-linter-field-overlay");
+    if (fieldOverlay) {
+      fieldOverlay.remove();
+    }
+  }
+
+  /**
    * Create a short on-page analysis overlay.
    * @param {object} payload - Analysis payload from popup.
    */
@@ -747,7 +764,7 @@
     closeButton.style.borderRadius = "6px";
     closeButton.style.padding = "2px 8px";
     closeButton.style.cursor = "pointer";
-    closeButton.addEventListener("click", () => container.remove());
+    closeButton.addEventListener("click", closeOverlay);
     header.appendChild(title);
     header.appendChild(closeButton);
 
